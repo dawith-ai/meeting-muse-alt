@@ -25,5 +25,12 @@ struct MeetingMuseAltApp: App {
         .commands {
             CommandGroup(replacing: .newItem) { }
         }
+
+        MenuBarExtra("Meeting Muse Alt", systemImage: MenuBarStatus.iconName(isRecording: recordingVM.isRecording)) {
+            MenuBarScene()
+                .environmentObject(recordingVM)
+                .environmentObject(detector)
+        }
+        .menuBarExtraStyle(.menu)
     }
 }
