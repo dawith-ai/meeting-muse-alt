@@ -4,12 +4,15 @@ import SwiftUI
 struct MeetingMuseAltApp: App {
     @StateObject private var recordingVM = RecordingViewModel()
     @StateObject private var detector = MeetingAppDetector()
+    @StateObject private var settings = AppSettings()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(recordingVM)
                 .environmentObject(detector)
+                .environmentObject(settings)
+                .preferredColorScheme(settings.preferredColorScheme)
                 .frame(minWidth: 900, minHeight: 600)
                 .task {
                     detector.start()
