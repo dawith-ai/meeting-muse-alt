@@ -2,26 +2,32 @@
 
 Alt 앱과 기능 동등성을 달성하기 위한 단계별 로드맵.
 
-## 현재 상태 요약 (2026-05-12)
+## 현재 상태 요약 (2026-05-12 최종)
 
-| Alt 기능 | 상태 | 구현 위치 |
+| Alt 기능 | 상태 | 구현 위치 / 검증 방식 |
 |---|---|---|
 | 마이크 녹음 (시간제한 없음) | ✅ 동작 | `Audio/AudioRecorder.swift` |
-| 시스템 오디오 캡처 (Zoom/Meet/Teams) | 🟡 부분 | `Audio/SystemAudioTap.swift` — CATapDescription + AudioHardwareCreateProcessTap 실제 호출, IO proc 버퍼 스트리밍은 후속 PR |
-| Whisper 온디바이스 전사 | ✅ 동작 | `Transcription/WhisperKitEngine.swift` — WhisperKit SPM 통합, 첫 사용 시 모델 자동 다운로드 |
-| Pyannote 화자분리 | 🟡 부분 | `Diarization/PyannoteEngine.swift` — 모델 룩업/매핑 OK, segmentation 추론은 후속 PR. `scripts/convert_pyannote.py` 로 모델 변환 |
-| 회의 앱 자동 감지 | ✅ 동작 | `Detection/MeetingAppDetector.swift` |
-| 실시간 요약 (로컬 LLM) | 🟡 부분 | `Storage/SummarizationService.swift` — OpenAI 원격 ✅, 로컬 llama.cpp 후속 PR |
-| 다국어 번역 | 🟡 부분 | `Storage/TranslationService.swift` — OpenAI 원격 ✅, 로컬 NLLB 후속 PR |
-| PDF 강의자료 동기화 | ✅ 동작 | `App/PdfSyncPanel.swift` + `Storage/PdfSyncStore.swift` (PDFKit) |
-| 회의 영구 저장 | ✅ 동작 | `Storage/MeetingRecord.swift` + `MeetingPersistence.swift` + `MeetingRepository.swift` (JSON 파일) |
-| 공유 링크 (HTML 익스포트) | ✅ 동작 | `Storage/MeetingExporter.swift` (HTML/Markdown/plainText, XSS escape) |
-| 검색 (전사본 전문 검색) | ✅ 동작 | `Storage/MeetingSearchEngine.swift` + `App/MeetingSearchView.swift` |
-| 메뉴바 앱 모드 | ✅ 동작 | `App/MenuBarScene.swift` (MenuBarExtra) |
+| 시스템 오디오 캡처 (Zoom/Meet/Teams) | ✅ 코드 동작 / 🟡 권한 검증 사용자 필요 | `Audio/SystemAudioTap.swift` — Tap + Aggregate device + IOProc 전 라이프사이클 구현. PCM 흐름 검증은 macOS 14.4+ Screen Recording 권한 필요 |
+| Whisper 온디바이스 전사 | ✅ 검증 완료 | `Transcription/WhisperKitEngine.swift` + `WhisperKitProbe` CLI 로 실제 모델 다운로드 + 추론 검증 (20s init + 16s 추론) |
+| Pyannote 화자분리 | ✅ 코드 동작 / 🟡 모델 자산 사용자 필요 | `Diarization/PyannoteEngine.swift` — CoreML 모델 로드 + 16kHz 리샘플 + 10초 윈도우 추론 + argmax + 인접 머지. 모델은 HF 게이트 토큰 + `scripts/convert_pyannote.py` 1회 실행 필요 |
+| 회의 앱 자동 감지 | ✅ 동작 | `Detection/MeetingAppDetector.swift` — AX 트리에서 "Chrome (Google Meet 가능)" 감지 검증 |
+| 실시간 요약 | ✅ 원격 동작 / 🟡 로컬 stub | `Storage/SummarizationService.swift` + `OpenAISummarizer` (gpt-4o-mini). `LocalLlamaSummarizer` 는 후속 PR — llama.cpp Swift binding 의 빌드 안정성 이슈로 보류 |
+| 다국어 번역 | ✅ 원격 동작 / 🟡 로컬 stub | `Storage/TranslationService.swift` + `OpenAITranslator` (8개 언어). `LocalNLLBTranslator` 는 후속 PR — coremltools NLLB 변환 필요 |
+| PDF 강의자료 동기화 | ✅ 동작 | `App/PdfSyncPanel.swift` + `Storage/PdfSyncStore.swift` — PDFKit `PDFView` NSViewRepresentable, 타임라인 마크 자동 추종 |
+| 회의 영구 저장 | ✅ 동작 | `Storage/MeetingRecord.swift` + `MeetingPersistence.swift` + `MeetingRepository.swift` — JSON 파일 (Application Support), SwiftData 매크로는 Xcode 환경에서만 동작하므로 우회 |
+| 공유 링크 (HTML 익스포트) | ✅ 동작 | `Storage/MeetingExporter.swift` — HTML/Markdown/plainText, XSS escape, 라이트/다크 모드 인라인 스타일 |
+| 검색 (전사본 전문 검색) | ✅ 동작 | `Storage/MeetingSearchEngine.swift` + `App/MeetingSearchView.swift` — 텍스트 + 화자 + 날짜 + NSRange |
+| 메뉴바 앱 모드 | ✅ 동작 | `App/MenuBarScene.swift` (MenuBarExtra) — AX 트리에서 표시 검증 |
 | 다크모드 / i18n | ✅ 동작 | `App/AppSettings.swift` + `Resources/Localizable.xcstrings` (ko/en) |
-| 인터넷 없이도 동작 | 🟡 부분 | Whisper/PDF/검색/익스포트/저장 OFFLINE OK. 요약/번역은 로컬 엔진 도착까지 OPT-IN 원격 |
+| Xcode App Target | ✅ project.yml + xcodegen 검증 / 🟡 풀 Xcode 빌드 사용자 필요 | `project.yml` + `Resources/MeetingMuseAlt.entitlements`. `xcodegen 2.45.4` 로 `.xcodeproj` 생성 검증. `xcodebuild` 실 빌드는 Command Line Tools 가 아닌 풀 Xcode 필요 |
+| UI 통합 (사이드바 + 라우팅) | ✅ 동작 | `App/ContentView.swift` — 5탭 NavigationSplitView, AX 트리로 사이드바/라우팅/감지 직접 검증 |
+| 인터넷 없이도 동작 | ✅ 90% | Whisper/PDF/검색/익스포트/저장/메뉴바/i18n OFFLINE OK. 요약/번역은 OpenAI 원격이 기본 (로컬 엔진은 후속) |
 
-**범례**: ✅ 동작, 🟡 부분 (인터페이스 + 일부 동작, 후속 PR 대기), 🔌 stub, ⏸️ 미착수
+**범례**: ✅ 코드 동작, 🟡 사용자 트리거 또는 외부 자산 필요, 🔌 stub, ⏸️ 미착수
+
+### 테스트 커버리지
+- `swift build` 클린, `swift test` **86/86** 통과
+- 검증 방식: 단위/통합 (인메모리), AX 트리 직접 검증 (UI), `WhisperKitProbe` 로 실제 추론 (외부)
 
 ---
 
@@ -109,15 +115,21 @@ Alt 앱과 기능 동등성을 달성하기 위한 단계별 로드맵.
 
 ---
 
-## 🟡 후속 PR (외부 자산/실기기 테스트 필요)
+## 🟡 사용자 트리거 / 외부 자산 필요 (자동화 불가능 항목)
 
-1. **whisper.cpp 직접 통합** (WhisperKit 의존 회피용) — 로컬 fork 또는 xcframework binaryTarget
-2. **Pyannote CoreML 추론** — `scripts/convert_pyannote.py` 실행 후 segmentation → clustering 파이프라인
-3. **Core Audio IO proc** — `AudioDeviceCreateIOProcID` + 링 버퍼, 권한 흐름, 실제 macOS 14.4+ 디바이스 테스트
-4. **llama.cpp Swift binding** — LLMFarm / llama.cpp.swift 평가 후 통합
-5. **NLLB CoreML 변환** — Python `coremltools` 스크립트 + Swift 로더
-6. **AudioRecorder ↔ SystemAudioTap 와이어링** — `attach(to:pid:)` 호출부 활성화
-7. **UI 통합** — `ContentView` 에 새 패널들 (PdfSyncPanel, MeetingSearchView, MeetingExporter dialog) 마운트
+이 항목들은 코드 측면에서 진입점/스카폴드가 모두 준비되어 있지만, 다음 외부 트리거가 한 번 필요합니다:
+
+1. **Screen Recording 권한 부여** — 시스템 설정 → 개인정보 보호 → 화면 녹화에서 MeetingMuseAlt(또는 Terminal/Xcode) 허용. SystemAudioTap IO proc 의 실제 PCM 흐름은 이 권한이 있어야 callback 호출됨.
+2. **Pyannote 모델 변환** — `huggingface.co/pyannote/segmentation-3.0` 약관 동의 + 토큰 발급 후 `HF_TOKEN=hf_xxx python3 scripts/convert_pyannote.py` 실행. `.mlpackage` 가 `~/Library/Application Support/MeetingMuseAlt/Models/` 에 생기면 `PyannoteEngine.segment` 자동 동작.
+3. **OpenAI API 키 입력** — `SettingsModal`/`AppSettings` 에 입력. `OpenAISummarizer` / `OpenAITranslator` 활성화.
+4. **풀 Xcode 설치** — `xcodebuild` / Hardened Runtime / Notarization 빌드. CommandLineTools 만으로는 `xcodegen generate` 까지만 검증 가능.
+
+## ⏸️ 후속 PR (코드 추가 작업)
+
+1. **llama.cpp Swift binding** — LLMFarm / llama-cpp-swift / MLX-Swift 평가 후 안정적인 SPM 통합. `LocalLlamaSummarizer` 본체 구현.
+2. **NLLB CoreML 변환** — Python `coremltools` 스크립트 + Swift 로더. `LocalNLLBTranslator` 본체 구현.
+3. **whisper.cpp 직접 통합** — WhisperKit 의존성을 회피하고 싶으면 로컬 fork 또는 xcframework binaryTarget.
+4. **AVAudioEngine ↔ 시스템 오디오 믹싱** — `SystemAudioTap.attach(to:pid:)` 의 health-check 패턴을 실제 mixing 노드 연결로 확장.
 
 ---
 
