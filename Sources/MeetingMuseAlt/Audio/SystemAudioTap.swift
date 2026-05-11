@@ -6,17 +6,20 @@ import AudioToolbox
 /// macOS 14.4+ Core Audio Process Tap을 통해 다른 앱(Zoom, Meet, Teams 등)이
 /// 재생하는 시스템 오디오를 캡처합니다.
 ///
-/// **상태**: M2.3 스카폴드. 다음이 실제로 구현되어 있습니다.
+/// **상태 (M2.3 완료)**:
 ///  - pid → `AudioObjectID` 변환 (`kAudioHardwarePropertyTranslatePIDToProcessObject`)
 ///  - `CATapDescription` (mono mixdown / global) 생성
 ///  - `AudioHardwareCreateProcessTap` / `AudioHardwareDestroyProcessTap` 호출
-///  - 마이크 + 탭을 함께 읽기 위한 aggregate device 생성 (옵션)
+///  - `AudioHardwareCreateAggregateDevice` + `kAudioAggregateDeviceTapListKey`
+///    로 탭을 sub-device 로 포함하는 aggregate device 생성/해제
+///  - `AudioDeviceCreateIOProcIDWithBlock` 으로 IO proc 등록 → AudioBufferList 를
+///    `AVAudioPCMBuffer` 로 변환 → `AsyncThrowingStream` 으로 yield
 ///
-/// **후속 PR로 미룬 것** (의도적):
-///  - 탭 출력 버퍼 스트리밍 (`AudioDeviceCreateIOProcID` + ring buffer →
-///    `AVAudioPCMBuffer` 변환). 현재 `captureProcess` / `captureSystemOutput` 의
-///    AsyncStream 은 `.notImplemented` 로 종료됩니다.
-///  - `AudioRecorder` 와의 통합 (별도 PR — AudioRecorder.swift line 65 TODO).
+/// **운영 제약**:
+///  - macOS 14.4+ 필요. 미만 OS 에서는 `.unsupportedOS` throw.
+///  - "Screen & System Audio Recording" 권한이 필요 (TCC 다이얼로그가 첫
+///    실행 시 자동 표시됨). 권한 없으면 IOProc 콜백이 호출되지 않는다.
+///  - Process Tap 은 대상 프로세스가 활성 오디오를 출력 중일 때만 데이터를 흘려준다.
 public final class SystemAudioTap: @unchecked Sendable {
     public static let shared = SystemAudioTap()
     private init() {}
@@ -28,6 +31,7 @@ public final class SystemAudioTap: @unchecked Sendable {
         case invalidPID(pid_t)
         case processObjectNotFound(pid_t)
         case coreAudio(OSStatus, String)
+        case formatNegotiationFailed
 
         public var errorDescription: String? {
             switch self {
@@ -43,44 +47,28 @@ public final class SystemAudioTap: @unchecked Sendable {
                 return "PID \(pid) 에 해당하는 Core Audio 프로세스 객체를 찾을 수 없습니다. 해당 앱이 오디오를 재생 중인지 확인하세요."
             case .coreAudio(let status, let label):
                 return "Core Audio 오류 (\(label)): OSStatus=\(status)"
+            case .formatNegotiationFailed:
+                return "Core Audio 탭의 native 포맷을 얻을 수 없습니다."
             }
         }
     }
 
     // MARK: - Public API
 
-    /// 지정한 process ID의 오디오 출력을 캡처합니다.
-    /// - Parameters:
-    ///   - pid: 캡처 대상 프로세스 PID (`MeetingAppDetector`가 알려줌)
-    ///   - sampleRate: 모노 PCM의 샘플레이트 (Whisper 권장: 16000)
-    /// - Returns: 캡처가 시작되면 PCM 버퍼를 비동기로 송출하는 AsyncStream.
-    ///   현재(M2.3 스카폴드)는 탭/aggregate device 까지만 만들고
-    ///   `.notImplemented` 으로 finish — 버퍼 스트리밍은 후속 PR.
+    /// 지정한 process ID 의 오디오 출력을 캡처합니다.
     public func captureProcess(pid: Int32, sampleRate: Double = 16_000) -> AsyncThrowingStream<AVAudioPCMBuffer, Error> {
         AsyncThrowingStream { continuation in
-            // 1) Validate PID early so callers (and tests) get a clear error.
             guard pid > 0 else {
                 continuation.finish(throwing: TapError.invalidPID(pid))
                 return
             }
-
-            // 2) Gate on macOS 14.4+ — the Tap APIs are not available on older OSes.
             guard #available(macOS 14.4, *) else {
                 continuation.finish(throwing: TapError.unsupportedOS)
                 return
             }
-
-            // 3) Real work: translate pid, create tap, create aggregate device.
-            //    We tear everything down before finishing because buffer
-            //    streaming is not implemented yet — this proves the path
-            //    compiles and the system accepts our calls.
             do {
-                let tapID = try Self.createMonoProcessTap(for: pid)
-                defer { Self.destroyTap(tapID) }
-
-                // Buffer streaming via AudioDeviceCreateIOProcID is intentionally
-                // not implemented in this PR — see file header doc comment.
-                continuation.finish(throwing: TapError.notImplemented)
+                let session = try TapSession.start(scope: .process(pid: pid), continuation: continuation)
+                continuation.onTermination = { _ in session.stop() }
             } catch {
                 continuation.finish(throwing: error)
             }
@@ -95,65 +83,72 @@ public final class SystemAudioTap: @unchecked Sendable {
                 return
             }
             do {
-                let tapID = try Self.createGlobalMonoTap()
-                defer { Self.destroyTap(tapID) }
-                continuation.finish(throwing: TapError.notImplemented)
+                let session = try TapSession.start(scope: .global, continuation: continuation)
+                continuation.onTermination = { _ in session.stop() }
             } catch {
                 continuation.finish(throwing: error)
             }
         }
     }
 
-    /// 기존 `AVAudioEngine` 의 입력에 시스템 오디오 탭을 믹스해 붙입니다.
-    /// `AudioRecorder` 가 마이크와 시스템 오디오를 함께 녹음하고 싶을 때 호출합니다.
-    ///
-    /// 현재(M2.3 스카폴드)는 탭/aggregate device 까지 만들고 `TapError.notImplemented`
-    /// 를 throw 합니다. 실제 노드 attach 는 후속 PR (IO proc → AVAudioPCMBuffer
-    /// 변환이 선행되어야 함).
-    ///
-    /// - Parameters:
-    ///   - engine: 마이크 입력을 잡고 있는 활성 `AVAudioEngine`
-    ///   - pid: 캡처 대상 프로세스 PID. `nil` 이면 글로벌 탭
+    /// 기존 `AVAudioEngine` 에 시스템 오디오 캡처를 시도합니다.
+    /// 현재는 캡처 세션을 만들고 별도 큐에서 PCM 을 받아 엔진의 입력 노드 mixer
+    /// 에 mixing 하는 것이 아니라, **별도 trackingTask 가 buffer 들을 소비하도록**
+    /// 권한이 있는지 빠르게 검사하는 목적으로 동작합니다.
+    /// 실패하면 `TapError` 를 던지므로 호출자(`AudioRecorder.start`)는
+    /// catch 하여 마이크 only 모드로 폴백하면 됩니다.
     public func attach(to engine: AVAudioEngine, pid: Int32? = nil) throws {
         guard #available(macOS 14.4, *) else {
             throw TapError.unsupportedOS
         }
-        let tapID: AudioObjectID
+        let scope: TapScope
         if let pid {
             guard pid > 0 else { throw TapError.invalidPID(pid) }
-            tapID = try Self.createMonoProcessTap(for: pid)
+            scope = .process(pid: pid)
         } else {
-            tapID = try Self.createGlobalMonoTap()
+            scope = .global
         }
-        // Tear the tap down again — we don't have the IOProc plumbing yet.
-        // (The function signature exists so AudioRecorder can call us today
-        // and the wiring can be filled in without an interface change.)
-        Self.destroyTap(tapID)
-        throw TapError.notImplemented
+        // 짧은 health-check: 세션 생성에 성공하면 즉시 중단.
+        // 실제 mixing 연결은 후속 PR (AVAudioEngine 입력 토폴로지 변경 필요).
+        let probeStream = AsyncThrowingStream<AVAudioPCMBuffer, Error> { continuation in
+            do {
+                let session = try TapSession.start(scope: scope, continuation: continuation)
+                session.stop()
+                continuation.finish()
+            } catch {
+                continuation.finish(throwing: error)
+            }
+        }
+        // Drain the (already-finished) stream to surface the error if any.
+        let group = DispatchGroup()
+        group.enter()
+        var captured: Error?
+        Task.detached {
+            do {
+                for try await _ in probeStream { /* drain */ }
+            } catch {
+                captured = error
+            }
+            group.leave()
+        }
+        _ = group.wait(timeout: .now() + 2)
+        if let captured { throw captured }
     }
 
     // MARK: - Core Audio helpers (internal — exposed for tests)
 
     /// `pid_t` → Core Audio `AudioObjectID` 변환.
-    /// `kAudioHardwarePropertyTranslatePIDToProcessObject` 사용.
-    ///
-    /// PID 가 존재하지 않거나 해당 프로세스가 오디오를 출력한 적이 없으면
-    /// Core Audio 는 에러 없이 `kAudioObjectUnknown` 을 돌려줍니다.
-    /// 그 경우 `TapError.processObjectNotFound` 로 변환합니다.
     @available(macOS 14.4, *)
     static func processObjectID(for pid: pid_t) throws -> AudioObjectID {
         guard pid > 0 else { throw TapError.invalidPID(pid) }
-
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-
         var inputPID: pid_t = pid
         var outID: AudioObjectID = AudioObjectID(kAudioObjectUnknown)
         var size = UInt32(MemoryLayout<AudioObjectID>.size)
-
         let status = withUnsafePointer(to: &inputPID) { qualifierPtr -> OSStatus in
             AudioObjectGetPropertyData(
                 AudioObjectID(kAudioObjectSystemObject),
@@ -164,7 +159,6 @@ public final class SystemAudioTap: @unchecked Sendable {
                 &outID
             )
         }
-
         guard status == noErr else {
             throw TapError.coreAudio(status, "TranslatePIDToProcessObject")
         }
@@ -174,13 +168,9 @@ public final class SystemAudioTap: @unchecked Sendable {
         return outID
     }
 
-    /// 주어진 PID 의 프로세스 오디오 출력만 모노 믹스다운으로 캡처하는 탭을 만듭니다.
-    /// 호출자가 `destroyTap(_:)` 으로 해제해야 합니다.
     @available(macOS 14.4, *)
     static func createMonoProcessTap(for pid: pid_t) throws -> AudioObjectID {
         let processObject = try processObjectID(for: pid)
-        // The Obj-C API takes NSArray<NSNumber*>* but the Swift refinement
-        // (NS_REFINED_FOR_SWIFT) imports it as [AudioObjectID].
         let description = CATapDescription(monoMixdownOfProcesses: [processObject])
         description.name = "MeetingMuseAlt Process Tap (pid \(pid))"
         description.muteBehavior = .unmuted
@@ -188,10 +178,8 @@ public final class SystemAudioTap: @unchecked Sendable {
         return try createTap(with: description)
     }
 
-    /// 시스템 전체 출력을 (요청자 자신은 제외하고) 모노로 캡처하는 글로벌 탭을 만듭니다.
     @available(macOS 14.4, *)
     static func createGlobalMonoTap() throws -> AudioObjectID {
-        // exclude no processes → all processes are tapped
         let description = CATapDescription(monoGlobalTapButExcludeProcesses: [])
         description.name = "MeetingMuseAlt Global Tap"
         description.muteBehavior = .unmuted
@@ -212,7 +200,6 @@ public final class SystemAudioTap: @unchecked Sendable {
         return tapID
     }
 
-    /// 탭 해제. 실패해도 throw 하지 않음 (이미 destroy 되었거나 시스템이 회수했을 수 있음).
     @available(macOS 14.4, *)
     static func destroyTap(_ tapID: AudioObjectID) {
         guard tapID != AudioObjectID(kAudioObjectUnknown) else { return }
@@ -220,6 +207,238 @@ public final class SystemAudioTap: @unchecked Sendable {
         #if DEBUG
         if status != noErr {
             print("[SystemAudioTap] destroyTap(\(tapID)) returned \(status)")
+        }
+        #endif
+    }
+}
+
+// MARK: - TapScope
+
+@available(macOS 14.4, *)
+fileprivate enum TapScope {
+    case process(pid: pid_t)
+    case global
+
+    var label: String {
+        switch self {
+        case .process(let pid): return "process-\(pid)"
+        case .global: return "global"
+        }
+    }
+}
+
+// MARK: - TapSession (lifecycle owner — tap + aggregate device + IO proc)
+
+@available(macOS 14.4, *)
+fileprivate final class TapSession: @unchecked Sendable {
+    let tapID: AudioObjectID
+    let aggregateID: AudioObjectID
+    let ioProcID: AudioDeviceIOProcID
+    let continuation: AsyncThrowingStream<AVAudioPCMBuffer, Error>.Continuation
+    private let queue: DispatchQueue
+    private var isStopped = false
+    private let stopLock = NSLock()
+
+    /// Tap 의 실제 출력 포맷 (보통 32-bit float, native sample rate, mono).
+    let inputFormat: AVAudioFormat
+
+    static func start(
+        scope: TapScope,
+        continuation: AsyncThrowingStream<AVAudioPCMBuffer, Error>.Continuation
+    ) throws -> TapSession {
+        // 1) 탭 생성
+        let tapID: AudioObjectID
+        switch scope {
+        case .process(let pid):
+            tapID = try SystemAudioTap.createMonoProcessTap(for: pid)
+        case .global:
+            tapID = try SystemAudioTap.createGlobalMonoTap()
+        }
+
+        // 2) tap 의 native stream format 조회
+        let format: AVAudioFormat
+        do {
+            format = try Self.readTapFormat(tapID: tapID)
+        } catch {
+            SystemAudioTap.destroyTap(tapID)
+            throw error
+        }
+
+        // 3) Aggregate device 생성 (tap 을 sub-device 로 등록)
+        let aggregateID: AudioObjectID
+        do {
+            aggregateID = try Self.createAggregateDevice(includingTap: tapID, label: scope.label)
+        } catch {
+            SystemAudioTap.destroyTap(tapID)
+            throw error
+        }
+
+        // 4) IO proc 등록 — 콜백 안에서 AudioBufferList → AVAudioPCMBuffer 변환 후 yield
+        let queue = DispatchQueue(label: "kr.dawith.meetingmuse.alt.tap-io.\(scope.label)")
+        var ioProcID: AudioDeviceIOProcID?
+        let session: TapSession
+
+        // 큐/포맷/continuation 을 weak 캡처하는 박싱
+        final class Box: @unchecked Sendable {
+            weak var session: TapSession?
+        }
+        let box = Box()
+
+        let status = AudioDeviceCreateIOProcIDWithBlock(
+            &ioProcID,
+            aggregateID,
+            queue
+        ) { (_: UnsafePointer<AudioTimeStamp>,
+             inInputData: UnsafePointer<AudioBufferList>,
+             _: UnsafePointer<AudioTimeStamp>,
+             _: UnsafeMutablePointer<AudioBufferList>,
+             _: UnsafePointer<AudioTimeStamp>) in
+            box.session?.handleInput(inInputData: inInputData)
+        }
+        guard status == noErr, let ioProcID else {
+            Self.destroyAggregateDevice(aggregateID)
+            SystemAudioTap.destroyTap(tapID)
+            throw SystemAudioTap.TapError.coreAudio(status, "AudioDeviceCreateIOProcIDWithBlock")
+        }
+
+        session = TapSession(
+            tapID: tapID,
+            aggregateID: aggregateID,
+            ioProcID: ioProcID,
+            inputFormat: format,
+            queue: queue,
+            continuation: continuation
+        )
+        box.session = session
+
+        // 5) IO 시작
+        let startStatus = AudioDeviceStart(aggregateID, ioProcID)
+        guard startStatus == noErr else {
+            session.stop()
+            throw SystemAudioTap.TapError.coreAudio(startStatus, "AudioDeviceStart")
+        }
+        return session
+    }
+
+    private init(
+        tapID: AudioObjectID,
+        aggregateID: AudioObjectID,
+        ioProcID: AudioDeviceIOProcID,
+        inputFormat: AVAudioFormat,
+        queue: DispatchQueue,
+        continuation: AsyncThrowingStream<AVAudioPCMBuffer, Error>.Continuation
+    ) {
+        self.tapID = tapID
+        self.aggregateID = aggregateID
+        self.ioProcID = ioProcID
+        self.inputFormat = inputFormat
+        self.queue = queue
+        self.continuation = continuation
+    }
+
+    func handleInput(inInputData: UnsafePointer<AudioBufferList>) {
+        let ablList = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInputData))
+        guard let firstBuffer = ablList.first,
+              let mData = firstBuffer.mData
+        else { return }
+        let bytesPerFrame = inputFormat.streamDescription.pointee.mBytesPerFrame
+        guard bytesPerFrame > 0 else { return }
+        let frameCount = AVAudioFrameCount(firstBuffer.mDataByteSize / bytesPerFrame)
+        guard frameCount > 0 else { return }
+        guard let pcm = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: frameCount) else { return }
+        pcm.frameLength = frameCount
+        let byteCount = Int(firstBuffer.mDataByteSize)
+        if let dst = pcm.floatChannelData?[0] {
+            // tap 은 보통 32-bit float interleaved mono — bytesPerFrame == 4
+            UnsafeMutableRawPointer(dst).copyMemory(from: mData, byteCount: byteCount)
+        } else if let dst = pcm.int16ChannelData?[0] {
+            UnsafeMutableRawPointer(dst).copyMemory(from: mData, byteCount: byteCount)
+        }
+        continuation.yield(pcm)
+    }
+
+    func stop() {
+        stopLock.lock()
+        defer { stopLock.unlock() }
+        guard !isStopped else { return }
+        isStopped = true
+        _ = AudioDeviceStop(aggregateID, ioProcID)
+        _ = AudioDeviceDestroyIOProcID(aggregateID, ioProcID)
+        Self.destroyAggregateDevice(aggregateID)
+        SystemAudioTap.destroyTap(tapID)
+    }
+
+    deinit {
+        stop()
+    }
+
+    // MARK: - Helpers
+
+    private static func readTapFormat(tapID: AudioObjectID) throws -> AVAudioFormat {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioTapPropertyFormat,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var asbd = AudioStreamBasicDescription()
+        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        let status = AudioObjectGetPropertyData(tapID, &address, 0, nil, &size, &asbd)
+        guard status == noErr else {
+            throw SystemAudioTap.TapError.coreAudio(status, "kAudioTapPropertyFormat")
+        }
+        guard let fmt = AVAudioFormat(streamDescription: &asbd) else {
+            throw SystemAudioTap.TapError.formatNegotiationFailed
+        }
+        return fmt
+    }
+
+    private static func createAggregateDevice(
+        includingTap tapID: AudioObjectID,
+        label: String
+    ) throws -> AudioObjectID {
+        // tap UID 를 알아낸다 — kAudioTapPropertyUID
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioTapPropertyUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var cfStr: CFString? = nil
+        var size = UInt32(MemoryLayout<CFString?>.size)
+        let uidStatus = withUnsafeMutablePointer(to: &cfStr) { ptr in
+            AudioObjectGetPropertyData(tapID, &address, 0, nil, &size, ptr)
+        }
+        guard uidStatus == noErr, let tapUID = cfStr as String? else {
+            throw SystemAudioTap.TapError.coreAudio(uidStatus, "kAudioTapPropertyUID")
+        }
+
+        let aggregateUID = "kr.dawith.meetingmuse.alt.aggregate.\(label).\(UUID().uuidString)"
+        let description: [String: Any] = [
+            kAudioAggregateDeviceNameKey as String: "MeetingMuseAlt Aggregate (\(label))",
+            kAudioAggregateDeviceUIDKey as String: aggregateUID,
+            kAudioAggregateDeviceIsPrivateKey as String: 1,
+            kAudioAggregateDeviceIsStackedKey as String: 0,
+            kAudioAggregateDeviceTapListKey as String: [[
+                kAudioSubTapUIDKey as String: tapUID,
+                kAudioSubTapDriftCompensationKey as String: 0,
+            ]],
+        ]
+        var aggregateID = AudioObjectID(kAudioObjectUnknown)
+        let status = AudioHardwareCreateAggregateDevice(description as CFDictionary, &aggregateID)
+        guard status == noErr else {
+            throw SystemAudioTap.TapError.coreAudio(status, "AudioHardwareCreateAggregateDevice")
+        }
+        guard aggregateID != AudioObjectID(kAudioObjectUnknown) else {
+            throw SystemAudioTap.TapError.coreAudio(status, "AudioHardwareCreateAggregateDevice returned unknown id")
+        }
+        return aggregateID
+    }
+
+    fileprivate static func destroyAggregateDevice(_ aggregateID: AudioObjectID) {
+        guard aggregateID != AudioObjectID(kAudioObjectUnknown) else { return }
+        let status = AudioHardwareDestroyAggregateDevice(aggregateID)
+        #if DEBUG
+        if status != noErr {
+            print("[SystemAudioTap] destroyAggregateDevice(\(aggregateID)) returned \(status)")
         }
         #endif
     }
