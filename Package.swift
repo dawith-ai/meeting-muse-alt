@@ -7,7 +7,8 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "MeetingMuseAlt", targets: ["MeetingMuseAlt"])
+        .executable(name: "MeetingMuseAlt", targets: ["MeetingMuseAlt"]),
+        .executable(name: "WhisperKitProbe", targets: ["WhisperKitProbe"])
     ],
     dependencies: [
         // Swift Testing — Xcode 16+ provides this in toolchain, but plain
@@ -29,6 +30,13 @@ let package = Package(
                 .product(name: "WhisperKit", package: "WhisperKit"),
             ],
             path: "Sources/MeetingMuseAlt",
+            exclude: [
+                // xcodegen 이 자동 생성하는 Info.plist 는 Xcode 빌드 전용으로,
+                // SPM 리소스 번들에 포함하면 top-level Info.plist 충돌이 발생한다.
+                "Resources/Info.plist",
+                // entitlements 도 Xcode 빌드 전용 — SPM 빌드는 코드사인 안 함.
+                "Resources/MeetingMuseAlt.entitlements",
+            ],
             resources: [
                 .process("Resources")
             ],
@@ -36,6 +44,16 @@ let package = Package(
                 // Swift 6 strict concurrency is incompatible with the
                 // non-Sendable AVAudioPCMBuffer streaming pattern we use.
                 // Revisit in M2 alongside the real whisper.cpp bridge.
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .executableTarget(
+            name: "WhisperKitProbe",
+            dependencies: [
+                .product(name: "WhisperKit", package: "WhisperKit"),
+            ],
+            path: "Sources/WhisperKitProbe",
+            swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]
         ),
