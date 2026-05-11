@@ -1,0 +1,2 @@
+# Reserved for bundled resources processed via `.process("Resources")` in Package.swift.
+# 모델 weights/CoreML 인코더는 Application Support/MeetingMuseAlt/Models 에 별도 설치합니다 (ModelInstaller 참조).
