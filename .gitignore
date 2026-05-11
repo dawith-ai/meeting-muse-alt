@@ -1,0 +1,33 @@
+# Swift / Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+Package.resolved
+
+# macOS
+.DS_Store
+*.swp
+*.swo
+
+# Models — large, downloaded separately
+Sources/MeetingMuseAlt/Resources/Models/*.bin
+Sources/MeetingMuseAlt/Resources/Models/*.mlmodelc/
+Sources/MeetingMuseAlt/Resources/Models/*.mlpackage/
+
+# Recordings
+recordings/
+*.caf
+*.wav
+*.m4a
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Build artifacts
+*.o
+*.dSYM/
