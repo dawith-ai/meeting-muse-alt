@@ -62,11 +62,15 @@ public final class AudioRecorder: @unchecked Sendable {
         }
 
         if includeSystemAudio {
-            // TODO(M2): Wire SystemAudioTap.shared.attach(to: engine) once Core Audio tap PoC lands.
-            // For now we record only the input device.
-            #if DEBUG
-            print("[AudioRecorder] System audio capture requested — falls back to mic-only until M2.")
-            #endif
+            // M2.3 1차: SystemAudioTap 객체 생성/해제는 가능하나 IO proc 버퍼
+            // 스트리밍이 아직 미구현이므로, 시도 후 실패하면 마이크 only 로 폴백.
+            do {
+                try SystemAudioTap.shared.attach(to: engine, pid: nil)
+            } catch {
+                #if DEBUG
+                print("[AudioRecorder] 시스템 오디오 캡처 활성화 실패 (마이크 only 폴백): \(error.localizedDescription)")
+                #endif
+            }
         }
 
         engine.prepare()

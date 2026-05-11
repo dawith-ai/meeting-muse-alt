@@ -16,6 +16,9 @@ public final class RecordingViewModel: ObservableObject {
     @Published public private(set) var elapsedSeconds: Double = 0
     @Published public var includeSystemAudio = false
     @Published public var errorAlert: ErrorAlert?
+    @Published public private(set) var currentRecording: AudioRecording?
+
+    public let pdfSyncStore = PdfSyncStore()
 
     private let recorder: AudioRecorder
     private let transcriber: TranscriptionService
@@ -48,6 +51,42 @@ public final class RecordingViewModel: ObservableObject {
     public func reset() {
         utterances = []
         elapsedSeconds = 0
+        currentRecording = nil
+        pdfSyncStore.clearMarks()
+    }
+
+    /// 현재 회의를 영구 저장소에 저장합니다.
+    ///
+    /// 마지막 녹음과 누적 발화, 그리고 PDF 동기화 마크까지 함께 직렬화합니다.
+    @discardableResult
+    public func saveCurrentMeeting(
+        repository: MeetingRepository,
+        title: String? = nil
+    ) throws -> MeetingRecord {
+        let resolvedTitle = title ?? Self.defaultTitle()
+        let snapshot = pdfSyncStore.snapshot()
+        var record = try repository.save(
+            title: resolvedTitle,
+            utterances: utterances,
+            durationSeconds: elapsedSeconds,
+            audioFileURL: currentRecording?.fileURL,
+            language: "ko",
+            summary: nil
+        )
+        // PDF 상태가 있으면 같은 레코드에 덧붙여 업데이트.
+        if snapshot.pdfURL != nil || !snapshot.marks.isEmpty {
+            record.pdfFilePath = snapshot.pdfURL?.path
+            record.pdfPageMarks = snapshot.marks
+            try repository.update(record)
+        }
+        return record
+    }
+
+    private static func defaultTitle() -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "ko")
+        f.dateFormat = "yyyy-MM-dd HH:mm 회의"
+        return f.string(from: Date())
     }
 
     private func start() async {
@@ -75,6 +114,7 @@ public final class RecordingViewModel: ObservableObject {
 
         do {
             let recording = try await recorder.stop()
+            currentRecording = recording
             let final = try await transcriber.transcribe(audioURL: recording.fileURL)
             utterances = final
         } catch {
@@ -91,6 +131,9 @@ public final class RecordingViewModel: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 self?.elapsedSeconds += 1
+                if let pdfStore = self?.pdfSyncStore, let elapsed = self?.elapsedSeconds {
+                    pdfStore.tick(timeSeconds: elapsed)
+                }
             }
         }
     }
@@ -116,3 +159,4 @@ public final class RecordingViewModel: ObservableObject {
         utterances.append(utt)
     }
 }
+

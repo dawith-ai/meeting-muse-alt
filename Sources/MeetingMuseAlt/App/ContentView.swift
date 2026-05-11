@@ -1,8 +1,44 @@
 import SwiftUI
 
+public enum ContentSection: String, CaseIterable, Identifiable, Hashable {
+    case record
+    case slides
+    case search
+    case library
+    case settings
+
+    public var id: String { rawValue }
+
+    public var label: String {
+        switch self {
+        case .record:   return "녹음"
+        case .slides:   return "발표 자료"
+        case .search:   return "검색"
+        case .library:  return "라이브러리"
+        case .settings: return "설정"
+        }
+    }
+
+    public var icon: String {
+        switch self {
+        case .record:   return "waveform"
+        case .slides:   return "doc.fill"
+        case .search:   return "magnifyingglass"
+        case .library:  return "books.vertical.fill"
+        case .settings: return "gear"
+        }
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject private var vm: RecordingViewModel
     @EnvironmentObject private var detector: MeetingAppDetector
+    @EnvironmentObject private var settings: AppSettings
+
+    @State private var selection: ContentSection = .record
+    @State private var repository: MeetingRepository = MeetingRepository(persistence: .shared)
+    @State private var librarySnapshot: [MeetingRecord] = []
+    @State private var saveBanner: String?
 
     var body: some View {
         NavigationSplitView {
@@ -19,9 +55,11 @@ struct ContentView: View {
     // MARK: - Sidebar
 
     private var sidebar: some View {
-        List {
-            Section("녹음") {
-                Label("새 회의", systemImage: "waveform")
+        List(selection: $selection) {
+            Section("탭") {
+                ForEach(ContentSection.allCases) { section in
+                    Label(section.label, systemImage: section.icon).tag(section)
+                }
             }
             Section("자동 감지") {
                 if detector.detectedApps.isEmpty {
@@ -41,20 +79,20 @@ struct ContentView: View {
 
     // MARK: - Detail
 
+    @ViewBuilder
     private var detail: some View {
         VStack(spacing: 0) {
             header
-
             Divider()
-
-            if vm.utterances.isEmpty && !vm.isRecording {
-                emptyState
-            } else {
-                transcriptList
+            if let banner = saveBanner {
+                Text(banner)
+                    .font(.callout)
+                    .padding(8)
+                    .frame(maxWidth: .infinity)
+                    .background(Color.green.opacity(0.15))
             }
-
+            sectionContent
             Divider()
-
             controlBar
         }
     }
@@ -65,12 +103,13 @@ struct ContentView: View {
                 .foregroundStyle(.tint)
             Text("Meeting Muse — Alt")
                 .font(.title2.bold())
+            Text("· \(selection.label)")
+                .font(.title3)
+                .foregroundStyle(.secondary)
             Spacer()
             if vm.isRecording {
                 HStack(spacing: 6) {
-                    Circle()
-                        .fill(.red)
-                        .frame(width: 8, height: 8)
+                    Circle().fill(.red).frame(width: 8, height: 8)
                     Text(vm.formattedElapsed)
                         .font(.system(.body, design: .monospaced))
                         .foregroundStyle(.red)
@@ -79,6 +118,30 @@ struct ContentView: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
+    }
+
+    @ViewBuilder
+    private var sectionContent: some View {
+        switch selection {
+        case .record:   recordSection
+        case .slides:
+            PdfSyncPanel(store: vm.pdfSyncStore, currentRecordingTime: { vm.elapsedSeconds })
+        case .search:
+            MeetingSearchView(repository: repository)
+                .onAppear { reloadLibrary() }
+        case .library:  librarySection
+        case .settings: settingsSection
+        }
+    }
+
+    private var recordSection: some View {
+        VStack(spacing: 0) {
+            if vm.utterances.isEmpty && !vm.isRecording {
+                emptyState
+            } else {
+                transcriptList
+            }
+        }
     }
 
     private var emptyState: some View {
@@ -103,24 +166,114 @@ struct ContentView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(Array(vm.utterances.enumerated()), id: \.element.id) { _, utt in
-                        UtteranceRow(utterance: utt)
-                            .id(utt.id)
+                        UtteranceRow(utterance: utt).id(utt.id)
                     }
                     if vm.isProcessing {
-                        ProgressView("정리 중...")
-                            .padding()
+                        ProgressView("정리 중...").padding()
                     }
                 }
                 .padding(20)
             }
             .onChange(of: vm.utterances.count) { _, _ in
                 if let last = vm.utterances.last {
-                    withAnimation {
-                        proxy.scrollTo(last.id, anchor: .bottom)
+                    withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                }
+            }
+        }
+    }
+
+    private var librarySection: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("저장된 회의 \(librarySnapshot.count)건")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("새로고침") { reloadLibrary() }
+                    .controlSize(.small)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            Divider()
+            if librarySnapshot.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "tray")
+                        .font(.system(size: 36))
+                        .foregroundStyle(.secondary.opacity(0.5))
+                    Text("저장된 회의가 없습니다")
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(librarySnapshot) { rec in
+                            libraryRow(rec)
+                            Divider()
+                        }
                     }
                 }
             }
         }
+        .onAppear { reloadLibrary() }
+    }
+
+    private func libraryRow(_ rec: MeetingRecord) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(rec.title).font(.headline)
+                HStack(spacing: 8) {
+                    Text(Self.dateFormatter.string(from: rec.createdAt))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                    Text("⏱ \(Int(rec.durationSeconds))s")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                    Text("\(rec.utterances.count) 발화")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if rec.pdfFilePath != nil {
+                        Image(systemName: "doc.fill").foregroundStyle(.tint)
+                    }
+                }
+            }
+            Spacer()
+            Button {
+                exportHTML(rec)
+            } label: {
+                Label("HTML 익스포트", systemImage: "square.and.arrow.up")
+                    .labelStyle(.iconOnly)
+            }
+            .buttonStyle(.borderless)
+            Button(role: .destructive) {
+                try? repository.delete(rec)
+                reloadLibrary()
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    private var settingsSection: some View {
+        Form {
+            Section("테마") {
+                Picker("색상 모드", selection: $settings.themeMode) {
+                    ForEach(ThemeMode.allCases) { mode in
+                        Text(mode.localizedLabel).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+            Section("정보") {
+                LabeledContent("앱 버전", value: "0.3.0")
+                LabeledContent("저장 위치", value: "~/Library/Application Support/MeetingMuseAlt/")
+                    .font(.caption.monospaced())
+            }
+        }
+        .formStyle(.grouped)
     }
 
     private var controlBar: some View {
@@ -138,11 +291,16 @@ struct ContentView: View {
             .buttonStyle(.borderedProminent)
             .tint(vm.isRecording ? .red : .accentColor)
 
-            if !vm.utterances.isEmpty {
-                Button("초기화", role: .destructive) {
-                    vm.reset()
+            if !vm.utterances.isEmpty && !vm.isRecording {
+                Button {
+                    saveMeeting()
+                } label: {
+                    Label("회의 저장", systemImage: "tray.and.arrow.down.fill")
                 }
-                .disabled(vm.isRecording)
+            }
+            if !vm.utterances.isEmpty {
+                Button("초기화", role: .destructive) { vm.reset() }
+                    .disabled(vm.isRecording)
             }
 
             Spacer()
@@ -155,6 +313,59 @@ struct ContentView: View {
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
     }
+
+    // MARK: - Actions
+
+    private func saveMeeting() {
+        do {
+            let saved = try vm.saveCurrentMeeting(repository: repository)
+            saveBanner = "저장 완료: \(saved.title)"
+            reloadLibrary()
+            // 3초 후 자동으로 배너 사라짐
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                if saveBanner?.contains(saved.title) == true {
+                    saveBanner = nil
+                }
+            }
+        } catch {
+            vm.errorAlert = ErrorAlert(title: "저장 실패", message: error.localizedDescription)
+        }
+    }
+
+    private func reloadLibrary() {
+        librarySnapshot = (try? repository.all()) ?? []
+    }
+
+    private func exportHTML(_ rec: MeetingRecord) {
+        let exporter = MeetingExporter()
+        let data = MeetingExportData(
+            title: rec.title,
+            createdAt: rec.createdAt,
+            durationSeconds: rec.durationSeconds,
+            language: rec.language,
+            summary: rec.summary,
+            utterances: rec.utterances
+        )
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.html]
+        panel.nameFieldStringValue = "\(rec.title).html"
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                try exporter.write(data, to: url, as: .html)
+                saveBanner = "익스포트 완료: \(url.lastPathComponent)"
+            } catch {
+                vm.errorAlert = ErrorAlert(title: "익스포트 실패", message: error.localizedDescription)
+            }
+        }
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f
+    }()
 }
 
 private struct UtteranceRow: View {
@@ -163,8 +374,7 @@ private struct UtteranceRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(speakerColor)
+                RoundedRectangle(cornerRadius: 8).fill(speakerColor)
                 Text(utterance.speaker.label)
                     .font(.caption.bold())
                     .foregroundStyle(.white)
