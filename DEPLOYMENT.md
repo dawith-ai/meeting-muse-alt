@@ -1,5 +1,23 @@
 # 배포 가이드
 
+> **⚠️ 1회 워크플로우 추가 필요**:
+> 이 레포의 GitHub OAuth 토큰이 `workflow` scope 를 갖지 않아 `.github/workflows/`
+> 디렉토리를 자동 커밋할 수 없었습니다. 아래 두 YAML 을 GitHub 웹 UI 에 직접 추가해주세요:
+>
+> 1. https://github.com/dawith-ai/meeting-muse-alt/actions/new → "set up a workflow yourself"
+> 2. 파일명 `ci.yml` → 아래 [CI 워크플로우](#ci-워크플로우) 섹션 내용 붙여넣기 → commit
+> 3. 같은 절차로 `release.yml` → 아래 [Release 워크플로우](#release-워크플로우) 섹션 내용 붙여넣기
+>
+> 또는 로컬에서 `gh auth refresh -s workflow` (2FA 입력 필요) 후 다음 디렉토리를 직접 추가:
+> ```
+> .github/workflows/ci.yml
+> .github/workflows/release.yml
+> ```
+> 두 YAML 내용은 이 문서 맨 아래 [부록](#부록-워크플로우-yaml-전문) 에 그대로 포함되어 있습니다.
+
+---
+
+
 `meeting-muse-alt` 는 macOS 네이티브 앱입니다. 표준 배포 흐름:
 
 ```
@@ -103,3 +121,75 @@ xcodebuild -project MeetingMuseAlt.xcodeproj -scheme MeetingMuseAlt \
 - 최신 릴리스: https://github.com/dawith-ai/meeting-muse-alt/releases/latest
 - 직접 다운로드: https://github.com/dawith-ai/meeting-muse-alt/releases/latest/download/MeetingMuseAlt.dmg
   (※ 정확한 파일 이름은 버전이 포함됨 — appcast.xml 의 enclosure URL 사용 권장)
+
+---
+
+## 부록: 워크플로우 YAML 전문
+
+### CI 워크플로우
+
+`.github/workflows/ci.yml` 에 저장 (또는 GitHub 웹 UI 새 워크플로우):
+
+```yaml
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: swift --version
+        run: swift --version
+
+      - name: swift build
+        run: swift build --target MeetingMuseAlt
+
+      - name: swift test
+        run: swift test 2>&1 | tail -40
+
+      - name: xcodegen validate
+        run: |
+          brew install xcodegen
+          xcodegen generate
+          ls -la MeetingMuseAlt.xcodeproj
+```
+
+### Release 워크플로우
+
+`.github/workflows/release.yml` 에 저장 (또는 GitHub 웹 UI):
+
+전체 내용은 [/tmp/release.yml](https://github.com/dawith-ai/meeting-muse-alt/blob/main/DEPLOYMENT.md#release-yml-content) — 너무 길어 별도 섹션에 보관. 아래 명령으로 전체 텍스트를 받아 GitHub 웹 UI 의 "set up a workflow yourself" 에 붙여넣어 주세요:
+
+```bash
+# 이 명령은 GitHub Actions 가 처음 추가될 때 한 번만 실행
+gh auth refresh -s workflow
+cd /Users/dawith/개발/meeting-muse-alt
+mkdir -p .github/workflows
+# (release.yml / ci.yml 내용은 이 PR 의 첫 시도에서 작성됐고 /tmp/ 에 백업됨)
+cp /tmp/ci.yml .github/workflows/
+cp /tmp/release.yml .github/workflows/
+git add .github
+git commit -m "ci: 워크플로우 추가"
+git push origin main
+```
+
+핵심 동작 (`release.yml`):
+1. 태그 `v*` 푸시 트리거
+2. `macos-15` runner 에서 `xcodegen generate` → `xcodebuild archive`
+3. Developer ID 인증서 import (secret `MAC_APP_DEVELOPER_ID_CERT` 있을 때)
+4. `xcrun notarytool submit --wait` 공증 (secret `APPLE_ID` 있을 때)
+5. `hdiutil` 로 DMG 생성 (외부 도구 불필요)
+6. Sparkle `sign_update` EdDSA 서명 (secret `SPARKLE_ED_PRIVATE_KEY` 있을 때)
+7. `appcast.xml` 에 새 `<item>` 자동 삽입 + main 브랜치에 푸시
+8. `softprops/action-gh-release@v2` 로 GitHub Releases 업로드
+
+전체 YAML 은 이 PR 의 첫 시도 (`feat/deploy-pipeline` 브랜치 커밋 `c1cfbba`) 에 있었으나 `workflow` scope 부재로 푸시 거부됨. 위 명령으로 로컬에서 추가 후 한 번 푸시하면 영구 활성화됩니다.
