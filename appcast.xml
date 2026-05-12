@@ -1,0 +1,11 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"
+     xmlns:dc="http://purl.org/dc/elements/1.1/"
+     version="2.0">
+  <channel>
+    <title>Meeting Muse Alt</title>
+    <link>https://github.com/dawith-ai/meeting-muse-alt</link>
+    <description>최신 업데이트</description>
+    <language>ko</language>
+  </channel>
+</rss>

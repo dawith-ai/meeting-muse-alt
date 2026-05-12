@@ -5,6 +5,7 @@ struct MeetingMuseAltApp: App {
     @StateObject private var recordingVM = RecordingViewModel()
     @StateObject private var detector = MeetingAppDetector()
     @StateObject private var settings = AppSettings()
+    @StateObject private var updater = UpdaterController.shared
 
     var body: some Scene {
         WindowGroup {
@@ -24,6 +25,7 @@ struct MeetingMuseAltApp: App {
         .windowResizability(.contentSize)
         .commands {
             CommandGroup(replacing: .newItem) { }
+            UpdaterCommands(controller: updater)
         }
 
         MenuBarExtra("Meeting Muse Alt", systemImage: MenuBarStatus.iconName(isRecording: recordingVM.isRecording)) {
