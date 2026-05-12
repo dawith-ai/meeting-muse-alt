@@ -17,6 +17,8 @@ public final class RecordingViewModel: ObservableObject {
     @Published public var includeSystemAudio = false
     @Published public var errorAlert: ErrorAlert?
     @Published public private(set) var currentRecording: AudioRecording?
+    @Published public private(set) var summaryMarkdown: String?
+    @Published public private(set) var isSummarizing = false
 
     public let pdfSyncStore = PdfSyncStore()
 
@@ -52,7 +54,30 @@ public final class RecordingViewModel: ObservableObject {
         utterances = []
         elapsedSeconds = 0
         currentRecording = nil
+        summaryMarkdown = nil
         pdfSyncStore.clearMarks()
+    }
+
+    /// `OpenAISummarizer` 호출. API 키 미입력 시 던지지 않고 `summaryMarkdown` 만 nil 유지.
+    public func generateSummary(apiKey: String, languageHint: String = "ko") async {
+        guard !utterances.isEmpty else { return }
+        guard !apiKey.isEmpty else {
+            errorAlert = ErrorAlert(title: "API 키 필요", message: "설정에서 OpenAI API 키를 입력해주세요.")
+            return
+        }
+        isSummarizing = true
+        defer { isSummarizing = false }
+        do {
+            let summarizer = OpenAISummarizer(apiKey: apiKey)
+            let md = try await summarizer.summarize(
+                utterances: utterances,
+                title: nil,
+                languageHint: languageHint
+            )
+            summaryMarkdown = md
+        } catch {
+            errorAlert = ErrorAlert(title: "요약 실패", message: error.localizedDescription)
+        }
     }
 
     /// 현재 회의를 영구 저장소에 저장합니다.
