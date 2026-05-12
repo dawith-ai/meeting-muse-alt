@@ -52,6 +52,7 @@ struct ContentView: View {
     @StateObject private var notesStore = MeetingNotesStore()
     @State private var librarySnapshot: [MeetingRecord] = []
     @State private var saveBanner: String?
+    @State private var openedRecord: MeetingRecord?
 
     var body: some View {
         NavigationSplitView {
@@ -62,6 +63,23 @@ struct ContentView: View {
         }
         .alert(item: $vm.errorAlert) { alert in
             Alert(title: Text(alert.title), message: Text(alert.message), dismissButton: .default(Text("확인")))
+        }
+        .sheet(item: $openedRecord) { rec in
+            MeetingDetailView(record: rec) { updated in
+                do {
+                    try repository.update(updated)
+                    openedRecord = updated
+                    reloadLibrary()
+                } catch {
+                    vm.errorAlert = ErrorAlert(title: "업데이트 실패", message: error.localizedDescription)
+                }
+            }
+            .frame(minWidth: 720, minHeight: 520)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("닫기") { openedRecord = nil }
+                }
+            }
         }
     }
 
@@ -264,6 +282,14 @@ struct ContentView: View {
             }
             Spacer()
             Button {
+                openedRecord = rec
+            } label: {
+                Label("열기", systemImage: "arrow.up.right.square")
+                    .labelStyle(.iconOnly)
+            }
+            .buttonStyle(.borderless)
+            .help("회의 상세 + 재생")
+            Button {
                 exportHTML(rec)
             } label: {
                 Label("HTML 익스포트", systemImage: "square.and.arrow.up")
@@ -280,6 +306,8 @@ struct ContentView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { openedRecord = rec }
     }
 
     private var settingsSection: some View {

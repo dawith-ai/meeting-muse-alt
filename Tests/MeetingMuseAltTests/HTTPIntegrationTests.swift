@@ -173,6 +173,50 @@ struct HTTPIntegrationSuite {
         #expect(pageURL.absoluteString.contains("notion.so"))
     }
 
+    // MARK: - Google Calendar
+
+    @Test func gcalEndToEndReturnsHtmlLink() async throws {
+        let url = URL(string: "https://example.com")!
+        let session = MockURLProtocol.makeSession()
+        MockURLProtocol.requestHandler = { req in
+            #expect(req.value(forHTTPHeaderField: "Authorization") == "Bearer tok-123")
+            return MockURLProtocol.jsonResponse(
+                "{\"htmlLink\":\"https://calendar.google.com/event?eid=abc\"}",
+                url: url
+            )
+        }
+        defer { MockURLProtocol.requestHandler = nil }
+
+        let exporter = GoogleCalendarAPIExporter(endpointBase: url, session: session)
+        let link = try await exporter.createEvent(
+            summary: "테스트", description: "본문",
+            startDate: Date(), durationSeconds: 60,
+            calendarID: "primary", accessToken: "tok-123"
+        )
+        #expect(link.absoluteString.contains("calendar.google.com"))
+    }
+
+    @Test func gcalEndToEndHandles403() async {
+        let url = URL(string: "https://example.com")!
+        let session = MockURLProtocol.makeSession()
+        MockURLProtocol.requestHandler = { _ in
+            MockURLProtocol.jsonResponse("{\"error\":\"forbidden\"}", status: 403, url: url)
+        }
+        defer { MockURLProtocol.requestHandler = nil }
+        let exporter = GoogleCalendarAPIExporter(endpointBase: url, session: session)
+        do {
+            _ = try await exporter.createEvent(
+                summary: "t", description: "d",
+                startDate: Date(), durationSeconds: 60,
+                calendarID: "primary", accessToken: "tok"
+            )
+            Issue.record("expected http error")
+        } catch let e as GoogleCalendarError {
+            if case .http(let status, _) = e { #expect(status == 403) }
+            else { Issue.record("Unexpected: \(e)") }
+        } catch { Issue.record("Unexpected: \(error)") }
+    }
+
     @Test func notionEndToEndDecodingFailsOnMissingURL() async {
         let url = URL(string: "https://example.com/v1/pages")!
         let session = MockURLProtocol.makeSession()
