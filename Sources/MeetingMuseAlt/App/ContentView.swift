@@ -321,8 +321,20 @@ struct ContentView: View {
                 .pickerStyle(.segmented)
             }
             Section("AI 서비스") {
-                SecureField("OpenAI API 키", text: $settings.openAIAPIKey, prompt: Text("sk-..."))
-                Text("요약 / 번역 / Ask AI 에서 사용됩니다. 키는 UserDefaults 에 평문 저장되며, 외부 송신은 OpenAI API 호출 시에만 발생합니다.")
+                Toggle("로컬 LLM 우선 사용 (Apple Intelligence)", isOn: $settings.preferLocalLLM)
+                if AppleFoundationModels.isAvailable {
+                    Label("Apple Intelligence 시스템 모델 사용 가능", systemImage: "checkmark.seal.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                } else {
+                    Label(AppleFoundationModels.unavailabilityReason ?? "사용 불가",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                Divider()
+                SecureField("OpenAI API 키 (원격 폴백)", text: $settings.openAIAPIKey, prompt: Text("sk-..."))
+                Text("로컬 LLM 미가용 시 원격 fallback. 키는 UserDefaults 평문 저장.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -367,11 +379,16 @@ struct ContentView: View {
                     Label("회의 저장", systemImage: "tray.and.arrow.down.fill")
                 }
                 Button {
-                    Task { await vm.generateSummary(apiKey: settings.openAIAPIKey) }
+                    Task {
+                        await vm.generateSummary(
+                            apiKey: settings.openAIAPIKey,
+                            preferLocal: settings.preferLocalLLM
+                        )
+                    }
                 } label: {
                     Label(vm.isSummarizing ? "요약 중..." : "AI 요약", systemImage: "sparkles")
                 }
-                .disabled(vm.isSummarizing || settings.openAIAPIKey.isEmpty)
+                .disabled(vm.isSummarizing || (settings.openAIAPIKey.isEmpty && !AppleFoundationModels.isAvailable))
             }
             if !vm.utterances.isEmpty {
                 Button("초기화", role: .destructive) { vm.reset() }

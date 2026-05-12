@@ -58,23 +58,47 @@ public final class RecordingViewModel: ObservableObject {
         pdfSyncStore.clearMarks()
     }
 
-    /// `OpenAISummarizer` 호출. API 키 미입력 시 던지지 않고 `summaryMarkdown` 만 nil 유지.
-    public func generateSummary(apiKey: String, languageHint: String = "ko") async {
+    /// 요약 생성. `preferLocal` 이 true 면 Apple Intelligence (FoundationModels) 시도,
+    /// 미가용 / 실패 시 OpenAI 원격으로 폴백. 둘 다 안 되면 errorAlert.
+    public func generateSummary(
+        apiKey: String,
+        languageHint: String = "ko",
+        preferLocal: Bool = true
+    ) async {
         guard !utterances.isEmpty else { return }
-        guard !apiKey.isEmpty else {
-            errorAlert = ErrorAlert(title: "API 키 필요", message: "설정에서 OpenAI API 키를 입력해주세요.")
-            return
-        }
         isSummarizing = true
         defer { isSummarizing = false }
-        do {
-            let summarizer = OpenAISummarizer(apiKey: apiKey)
-            let md = try await summarizer.summarize(
-                utterances: utterances,
-                title: nil,
-                languageHint: languageHint
+
+        // 1) 로컬 우선 시도
+        if preferLocal, AppleFoundationModels.isAvailable {
+            let local = AppleFoundationSummarizer()
+            do {
+                summaryMarkdown = try await local.summarize(
+                    utterances: utterances, title: nil, languageHint: languageHint
+                )
+                return
+            } catch {
+                #if DEBUG
+                print("[generateSummary] 로컬 실패, OpenAI 폴백: \(error.localizedDescription)")
+                #endif
+            }
+        }
+
+        // 2) OpenAI 폴백
+        guard !apiKey.isEmpty else {
+            let reason = AppleFoundationModels.unavailabilityReason
+                ?? "Apple Intelligence 미사용 가능."
+            errorAlert = ErrorAlert(
+                title: "요약 불가",
+                message: "\(reason)\n\nOpenAI 폴백을 위해 설정에서 API 키를 입력해주세요."
             )
-            summaryMarkdown = md
+            return
+        }
+        do {
+            let remote = OpenAISummarizer(apiKey: apiKey)
+            summaryMarkdown = try await remote.summarize(
+                utterances: utterances, title: nil, languageHint: languageHint
+            )
         } catch {
             errorAlert = ErrorAlert(title: "요약 실패", message: error.localizedDescription)
         }

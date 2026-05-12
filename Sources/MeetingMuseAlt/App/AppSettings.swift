@@ -38,6 +38,7 @@ public final class AppSettings: ObservableObject {
     public static let themeModeKey = "mm.alt.themeMode"
     public static let openAIAPIKeyKey = "mm.alt.openAIAPIKey"
     public static let whisperModelKey = "mm.alt.whisperModel"
+    public static let preferLocalLLMKey = "mm.alt.preferLocalLLM"
 
     public static let shared = AppSettings()
 
@@ -67,6 +68,15 @@ public final class AppSettings: ObservableObject {
         }
     }
 
+    /// 로컬 LLM (Apple Intelligence FoundationModels) 우선 사용 여부.
+    /// 미지원/미활성 시 자동으로 OpenAI 원격으로 폴백.
+    @Published public var preferLocalLLM: Bool {
+        didSet {
+            guard preferLocalLLM != oldValue else { return }
+            defaults.set(preferLocalLLM, forKey: Self.preferLocalLLMKey)
+        }
+    }
+
     /// - Parameter defaults: backing store. Defaults to `.standard`; pass a
     ///   suite-scoped instance from tests to isolate state.
     public init(defaults: UserDefaults = .standard) {
@@ -79,6 +89,12 @@ public final class AppSettings: ObservableObject {
         }
         self.openAIAPIKey = defaults.string(forKey: Self.openAIAPIKeyKey) ?? ""
         self.whisperModel = defaults.string(forKey: Self.whisperModelKey) ?? "tiny"
+        if defaults.object(forKey: Self.preferLocalLLMKey) != nil {
+            self.preferLocalLLM = defaults.bool(forKey: Self.preferLocalLLMKey)
+        } else {
+            // 기본값: Apple Intelligence 가 가용하면 local 우선, 아니면 OFF.
+            self.preferLocalLLM = AppleFoundationModels.isAvailable
+        }
     }
 
     /// Convenience pass-through to the current `themeMode`'s color scheme.

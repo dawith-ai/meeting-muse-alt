@@ -8,7 +8,8 @@ let package = Package(
     ],
     products: [
         .executable(name: "MeetingMuseAlt", targets: ["MeetingMuseAlt"]),
-        .executable(name: "WhisperKitProbe", targets: ["WhisperKitProbe"])
+        .executable(name: "WhisperKitProbe", targets: ["WhisperKitProbe"]),
+        .executable(name: "LLMProbe", targets: ["LLMProbe"])
     ],
     dependencies: [
         // Swift Testing — Xcode 16+ provides this in toolchain, but plain
@@ -20,6 +21,16 @@ let package = Package(
         //   기본 모델은 첫 사용 시 Hugging Face 에서 자동 다운로드되며
         //   `~/Documents/huggingface/` 에 캐시된다.
         .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "0.9.0"),
+        // M3.1: 로컬 LLM 은 Apple `FoundationModels` (macOS 15.1+ Apple Intelligence)
+        //   를 사용합니다. 외부 SPM 패키지 의존성 없이 시스템 모델로 추론하므로
+        //   빌드 안정성/의존성 충돌이 없습니다.
+        //
+        //   ※ 평가 후 보류한 대안:
+        //     - `mlx-swift-examples` 2.0.0 — `Libraries/MLXLLM/SwitchLayers.swift:128`
+        //       optional 미언랩핑으로 Swift 6.3 빌드 실패.
+        //     - `mlx-swift-examples` main — `MLXLLM` product 제거됨 (MNIST/StableDiffusion 만 노출).
+        //     - `LLM.swift` (eastriverlee) — 레포 부재 (404).
+        //     - `whisperkit` main + `mlx-swift-examples` main — `swift-transformers` 충돌.
         // Pyannote diarization is wired via Apple's coremltools-exported model
         // (loaded directly with CoreML) so it requires no SPM dependency.
     ],
@@ -44,6 +55,14 @@ let package = Package(
                 // Swift 6 strict concurrency is incompatible with the
                 // non-Sendable AVAudioPCMBuffer streaming pattern we use.
                 // Revisit in M2 alongside the real whisper.cpp bridge.
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .executableTarget(
+            name: "LLMProbe",
+            dependencies: [],
+            path: "Sources/LLMProbe",
+            swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]
         ),
