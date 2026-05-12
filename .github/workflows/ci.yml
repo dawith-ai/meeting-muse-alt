@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: swift --version
+        run: swift --version
+
+      - name: swift build
+        run: swift build --target MeetingMuseAlt
+
+      - name: swift test
+        run: swift test 2>&1 | tail -40
+
+      - name: xcodegen validate
+        run: |
+          brew install xcodegen
+          xcodegen generate
+          ls -la MeetingMuseAlt.xcodeproj
