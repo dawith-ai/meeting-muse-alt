@@ -36,6 +36,8 @@ public enum ThemeMode: String, CaseIterable, Identifiable, Sendable {
 @MainActor
 public final class AppSettings: ObservableObject {
     public static let themeModeKey = "mm.alt.themeMode"
+    public static let openAIAPIKeyKey = "mm.alt.openAIAPIKey"
+    public static let whisperModelKey = "mm.alt.whisperModel"
 
     public static let shared = AppSettings()
 
@@ -45,6 +47,23 @@ public final class AppSettings: ObservableObject {
         didSet {
             guard themeMode != oldValue else { return }
             defaults.set(themeMode.rawValue, forKey: Self.themeModeKey)
+        }
+    }
+
+    /// OpenAI API 키 (요약/번역/Ask AI 용). UserDefaults 평문 저장이지만
+    /// 향후 Keychain 으로 옮길 수 있도록 단일 setter/getter 로 캡슐화.
+    @Published public var openAIAPIKey: String {
+        didSet {
+            guard openAIAPIKey != oldValue else { return }
+            defaults.set(openAIAPIKey, forKey: Self.openAIAPIKeyKey)
+        }
+    }
+
+    /// WhisperKit 모델 이름 (tiny / base / small / medium / large).
+    @Published public var whisperModel: String {
+        didSet {
+            guard whisperModel != oldValue else { return }
+            defaults.set(whisperModel, forKey: Self.whisperModelKey)
         }
     }
 
@@ -58,6 +77,8 @@ public final class AppSettings: ObservableObject {
         } else {
             self.themeMode = .system
         }
+        self.openAIAPIKey = defaults.string(forKey: Self.openAIAPIKeyKey) ?? ""
+        self.whisperModel = defaults.string(forKey: Self.whisperModelKey) ?? "tiny"
     }
 
     /// Convenience pass-through to the current `themeMode`'s color scheme.

@@ -3,6 +3,9 @@ import SwiftUI
 public enum ContentSection: String, CaseIterable, Identifiable, Hashable {
     case record
     case slides
+    case analytics
+    case askAI
+    case actions
     case search
     case library
     case settings
@@ -11,21 +14,27 @@ public enum ContentSection: String, CaseIterable, Identifiable, Hashable {
 
     public var label: String {
         switch self {
-        case .record:   return "녹음"
-        case .slides:   return "발표 자료"
-        case .search:   return "검색"
-        case .library:  return "라이브러리"
-        case .settings: return "설정"
+        case .record:    return "녹음"
+        case .slides:    return "발표 자료"
+        case .analytics: return "분석"
+        case .askAI:     return "Ask AI"
+        case .actions:   return "액션 아이템"
+        case .search:    return "검색"
+        case .library:   return "라이브러리"
+        case .settings:  return "설정"
         }
     }
 
     public var icon: String {
         switch self {
-        case .record:   return "waveform"
-        case .slides:   return "doc.fill"
-        case .search:   return "magnifyingglass"
-        case .library:  return "books.vertical.fill"
-        case .settings: return "gear"
+        case .record:    return "waveform"
+        case .slides:    return "doc.fill"
+        case .analytics: return "chart.pie.fill"
+        case .askAI:     return "sparkles"
+        case .actions:   return "checklist"
+        case .search:    return "magnifyingglass"
+        case .library:   return "books.vertical.fill"
+        case .settings:  return "gear"
         }
     }
 }
@@ -126,6 +135,16 @@ struct ContentView: View {
         case .record:   recordSection
         case .slides:
             PdfSyncPanel(store: vm.pdfSyncStore, currentRecordingTime: { vm.elapsedSeconds })
+        case .analytics:
+            SpeakerAnalyticsView(utterances: vm.utterances)
+        case .askAI:
+            AskAISidebar(
+                utterances: vm.utterances,
+                apiKeyProvider: { settings.openAIAPIKey.isEmpty ? nil : settings.openAIAPIKey },
+                languageHint: "ko"
+            )
+        case .actions:
+            ActionItemsPanel(summaryMarkdown: vm.summaryMarkdown)
         case .search:
             MeetingSearchView(repository: repository)
                 .onAppear { reloadLibrary() }
@@ -267,6 +286,22 @@ struct ContentView: View {
                 }
                 .pickerStyle(.segmented)
             }
+            Section("AI 서비스") {
+                SecureField("OpenAI API 키", text: $settings.openAIAPIKey, prompt: Text("sk-..."))
+                Text("요약 / 번역 / Ask AI 에서 사용됩니다. 키는 UserDefaults 에 평문 저장되며, 외부 송신은 OpenAI API 호출 시에만 발생합니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("전사 모델") {
+                Picker("Whisper 모델", selection: $settings.whisperModel) {
+                    ForEach(["tiny", "base", "small", "medium", "large-v3"], id: \.self) { m in
+                        Text(m).tag(m)
+                    }
+                }
+                Text("첫 사용 시 HuggingFace 에서 자동 다운로드. tiny ≈ 75MB / large ≈ 3GB.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("정보") {
                 LabeledContent("앱 버전", value: "0.3.0")
                 LabeledContent("저장 위치", value: "~/Library/Application Support/MeetingMuseAlt/")
@@ -297,6 +332,12 @@ struct ContentView: View {
                 } label: {
                     Label("회의 저장", systemImage: "tray.and.arrow.down.fill")
                 }
+                Button {
+                    Task { await vm.generateSummary(apiKey: settings.openAIAPIKey) }
+                } label: {
+                    Label(vm.isSummarizing ? "요약 중..." : "AI 요약", systemImage: "sparkles")
+                }
+                .disabled(vm.isSummarizing || settings.openAIAPIKey.isEmpty)
             }
             if !vm.utterances.isEmpty {
                 Button("초기화", role: .destructive) { vm.reset() }
