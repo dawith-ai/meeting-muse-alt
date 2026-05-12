@@ -6,6 +6,7 @@ public enum ContentSection: String, CaseIterable, Identifiable, Hashable {
     case analytics
     case askAI
     case actions
+    case memo
     case search
     case library
     case settings
@@ -19,6 +20,7 @@ public enum ContentSection: String, CaseIterable, Identifiable, Hashable {
         case .analytics: return "분석"
         case .askAI:     return "Ask AI"
         case .actions:   return "액션 아이템"
+        case .memo:      return "메모"
         case .search:    return "검색"
         case .library:   return "라이브러리"
         case .settings:  return "설정"
@@ -32,6 +34,7 @@ public enum ContentSection: String, CaseIterable, Identifiable, Hashable {
         case .analytics: return "chart.pie.fill"
         case .askAI:     return "sparkles"
         case .actions:   return "checklist"
+        case .memo:      return "note.text"
         case .search:    return "magnifyingglass"
         case .library:   return "books.vertical.fill"
         case .settings:  return "gear"
@@ -46,6 +49,7 @@ struct ContentView: View {
 
     @State private var selection: ContentSection = .record
     @State private var repository: MeetingRepository = MeetingRepository(persistence: .shared)
+    @StateObject private var notesStore = MeetingNotesStore()
     @State private var librarySnapshot: [MeetingRecord] = []
     @State private var saveBanner: String?
 
@@ -145,6 +149,8 @@ struct ContentView: View {
             )
         case .actions:
             ActionItemsPanel(summaryMarkdown: vm.summaryMarkdown)
+        case .memo:
+            MemoPanel(store: notesStore, meetingID: nil)
         case .search:
             MeetingSearchView(repository: repository)
                 .onAppear { reloadLibrary() }
