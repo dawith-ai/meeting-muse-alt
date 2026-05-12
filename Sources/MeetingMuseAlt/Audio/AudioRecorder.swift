@@ -31,6 +31,7 @@ public final class AudioRecorder: @unchecked Sendable {
     private var audioFile: AVAudioFile?
     private var fileURL: URL?
     private var startTime: Date?
+    private var attachedTap: SystemAudioTap.AttachedSession?
 
     private var liveContinuation: AsyncStream<AVAudioPCMBuffer>.Continuation?
     public private(set) lazy var liveAudioStream: AsyncStream<AVAudioPCMBuffer> = {
@@ -62,14 +63,15 @@ public final class AudioRecorder: @unchecked Sendable {
         }
 
         if includeSystemAudio {
-            // M2.3 1차: SystemAudioTap 객체 생성/해제는 가능하나 IO proc 버퍼
-            // 스트리밍이 아직 미구현이므로, 시도 후 실패하면 마이크 only 로 폴백.
+            // SystemAudioTap.attach 는 mixer 에 시스템 오디오 PCM 을 schedule.
+            // 실패하면 마이크 only 로 폴백 (권한 미허용 / macOS 14.4 미만 등).
             do {
-                try SystemAudioTap.shared.attach(to: engine, pid: nil)
+                self.attachedTap = try SystemAudioTap.shared.attach(to: engine, pid: nil)
             } catch {
                 #if DEBUG
                 print("[AudioRecorder] 시스템 오디오 캡처 활성화 실패 (마이크 only 폴백): \(error.localizedDescription)")
                 #endif
+                self.attachedTap = nil
             }
         }
 
@@ -88,6 +90,8 @@ public final class AudioRecorder: @unchecked Sendable {
             throw AudioRecorderError.notRecording
         }
         engine.inputNode.removeTap(onBus: 0)
+        attachedTap?.stop()
+        attachedTap = nil
         engine.stop()
         liveContinuation?.finish()
         let duration = startTime.map { Date().timeIntervalSince($0) } ?? 0

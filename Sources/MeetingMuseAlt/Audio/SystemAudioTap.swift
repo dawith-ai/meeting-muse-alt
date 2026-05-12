@@ -91,13 +91,14 @@ public final class SystemAudioTap: @unchecked Sendable {
         }
     }
 
-    /// 기존 `AVAudioEngine` 에 시스템 오디오 캡처를 시도합니다.
-    /// 현재는 캡처 세션을 만들고 별도 큐에서 PCM 을 받아 엔진의 입력 노드 mixer
-    /// 에 mixing 하는 것이 아니라, **별도 trackingTask 가 buffer 들을 소비하도록**
-    /// 권한이 있는지 빠르게 검사하는 목적으로 동작합니다.
-    /// 실패하면 `TapError` 를 던지므로 호출자(`AudioRecorder.start`)는
-    /// catch 하여 마이크 only 모드로 폴백하면 됩니다.
-    public func attach(to engine: AVAudioEngine, pid: Int32? = nil) throws {
+    /// 기존 `AVAudioEngine` 에 시스템 오디오 캡처를 시작하고, 그 PCM 을 엔진의
+    /// player node 에 스케줄링해 mixer 와 함께 mixing 합니다.
+    ///
+    /// 반환된 `AttachedSession` 을 `stop()` 호출로 정리해야 합니다.
+    /// `attach` 가 던지면 호출자(`AudioRecorder.start`)는 catch 하여 마이크 only
+    /// 모드로 폴백하면 됩니다.
+    @discardableResult
+    public func attach(to engine: AVAudioEngine, pid: Int32? = nil) throws -> AttachedSession {
         guard #available(macOS 14.4, *) else {
             throw TapError.unsupportedOS
         }
@@ -108,31 +109,69 @@ public final class SystemAudioTap: @unchecked Sendable {
         } else {
             scope = .global
         }
-        // 짧은 health-check: 세션 생성에 성공하면 즉시 중단.
-        // 실제 mixing 연결은 후속 PR (AVAudioEngine 입력 토폴로지 변경 필요).
-        let probeStream = AsyncThrowingStream<AVAudioPCMBuffer, Error> { continuation in
-            do {
-                let session = try TapSession.start(scope: scope, continuation: continuation)
-                session.stop()
-                continuation.finish()
-            } catch {
-                continuation.finish(throwing: error)
-            }
+        return try AttachedSession.start(engine: engine, scope: scope)
+    }
+
+    /// `attach(to:pid:)` 의 반환 타입.
+    /// 외부에서는 `stop()` 호출만 가능하며 내부는 `TapSession` + `AVAudioPlayerNode`.
+    public final class AttachedSession: @unchecked Sendable {
+        fileprivate let stopHandler: () -> Void
+        fileprivate init(stopHandler: @escaping () -> Void) {
+            self.stopHandler = stopHandler
         }
-        // Drain the (already-finished) stream to surface the error if any.
-        let group = DispatchGroup()
-        group.enter()
-        var captured: Error?
-        Task.detached {
-            do {
-                for try await _ in probeStream { /* drain */ }
-            } catch {
-                captured = error
+        public func stop() { stopHandler() }
+        deinit { stopHandler() }
+
+        @available(macOS 14.4, *)
+        fileprivate static func start(engine: AVAudioEngine, scope: TapScope) throws -> AttachedSession {
+            let stream = AsyncThrowingStream<AVAudioPCMBuffer, Error> { continuation in
+                do {
+                    let session = try TapSession.start(scope: scope, continuation: continuation)
+                    continuation.onTermination = { _ in session.stop() }
+                } catch {
+                    continuation.finish(throwing: error)
+                }
             }
-            group.leave()
+
+            // 별도 player node 를 엔진에 붙이고, tap 의 PCM 을 schedule.
+            let player = AVAudioPlayerNode()
+            engine.attach(player)
+
+            // Player 의 format 은 첫 buffer 에서 결정 — 미리 main mixer 에 임시 연결.
+            // SystemAudioTap 의 native format 은 보통 32-bit float mono 16-48kHz.
+            // 첫 buffer 가 들어올 때까지 연결을 미루고, 들어오면 연결 + play.
+            var connected = false
+            let consumeTask = Task.detached {
+                do {
+                    for try await buf in stream {
+                        if Task.isCancelled { break }
+                        if !connected {
+                            await MainActor.run {
+                                if engine.isRunning {
+                                    engine.connect(player, to: engine.mainMixerNode, format: buf.format)
+                                } else {
+                                    engine.connect(player, to: engine.mainMixerNode, format: buf.format)
+                                }
+                                player.play()
+                            }
+                            connected = true
+                        }
+                        await player.scheduleBuffer(buf)
+                    }
+                } catch {
+                    #if DEBUG
+                    print("[SystemAudioTap.attach] stream ended with error: \(error)")
+                    #endif
+                }
+            }
+
+            let stop: () -> Void = {
+                consumeTask.cancel()
+                player.stop()
+                engine.detach(player)
+            }
+            return AttachedSession(stopHandler: stop)
         }
-        _ = group.wait(timeout: .now() + 2)
-        if let captured { throw captured }
     }
 
     // MARK: - Core Audio helpers (internal — exposed for tests)

@@ -4,7 +4,7 @@ import Foundation
 
 @Test func contentSectionAllCasesContainsAllTabs() {
     let labels = ContentSection.allCases.map(\.label)
-    #expect(labels == ["녹음", "발표 자료", "분석", "Ask AI", "액션 아이템", "검색", "라이브러리", "설정"])
+    #expect(labels == ["녹음", "발표 자료", "분석", "Ask AI", "액션 아이템", "메모", "검색", "라이브러리", "설정"])
 }
 
 @Test func contentSectionIconsAreNonEmpty() {

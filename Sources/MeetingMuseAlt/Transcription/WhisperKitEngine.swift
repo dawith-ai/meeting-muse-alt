@@ -9,7 +9,14 @@ import WhisperKit
 /// `transcribe` 가 던지는 에러를 호출자가 처리하면 된다.
 public final class WhisperKitEngine: TranscriptionService, @unchecked Sendable {
     /// WhisperKit 모델 이름. 기본값은 가장 가벼운 `tiny` (~75MB).
-    public let modelName: String
+    public private(set) var modelName: String
+
+    /// 런타임에 모델을 교체. 이미 로드된 파이프는 폐기되어 다음 호출 시 재초기화.
+    public func setModelName(_ newName: String) async {
+        guard newName != modelName else { return }
+        modelName = newName
+        await box.reset()
+    }
     /// 초기화는 actor 격리로 단일 호출만 발생하도록 보장한다.
     private actor PipeBox {
         var pipe: WhisperKit?
@@ -19,6 +26,7 @@ public final class WhisperKitEngine: TranscriptionService, @unchecked Sendable {
             return new
         }
         func current() -> WhisperKit? { pipe }
+        func reset() { pipe = nil }
     }
     private let box = PipeBox()
 
