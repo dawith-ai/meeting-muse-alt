@@ -2,7 +2,7 @@
 
 Alt 앱과 기능 동등성을 달성하기 위한 단계별 로드맵.
 
-## 현재 상태 요약 (2026-05-12 최종)
+## 현재 상태 요약 (2026-05-12 — 패리티 2차 머지 후)
 
 | Alt 기능 | 상태 | 구현 위치 / 검증 방식 |
 |---|---|---|
@@ -20,13 +20,18 @@ Alt 앱과 기능 동등성을 달성하기 위한 단계별 로드맵.
 | 메뉴바 앱 모드 | ✅ 동작 | `App/MenuBarScene.swift` (MenuBarExtra) — AX 트리에서 표시 검증 |
 | 다크모드 / i18n | ✅ 동작 | `App/AppSettings.swift` + `Resources/Localizable.xcstrings` (ko/en) |
 | Xcode App Target | ✅ project.yml + xcodegen 검증 / 🟡 풀 Xcode 빌드 사용자 필요 | `project.yml` + `Resources/MeetingMuseAlt.entitlements`. `xcodegen 2.45.4` 로 `.xcodeproj` 생성 검증. `xcodebuild` 실 빌드는 Command Line Tools 가 아닌 풀 Xcode 필요 |
-| UI 통합 (사이드바 + 라우팅) | ✅ 동작 | `App/ContentView.swift` — 5탭 NavigationSplitView, AX 트리로 사이드바/라우팅/감지 직접 검증 |
+| UI 통합 (사이드바 + 라우팅) | ✅ 동작 | `App/ContentView.swift` — **9탭** NavigationSplitView (녹음/발표 자료/분석/Ask AI/액션 아이템/메모/검색/라이브러리/설정), AX 트리로 사이드바/라우팅/감지 직접 검증 |
+| 화자별 발화 분석 | ✅ 동작 | `Storage/SpeakerAnalyzer.swift` + `App/SpeakerAnalyticsView.swift` — 발화 시간/횟수/비율/다양성 지수 (순수 계산) |
+| Ask AI (회의 Q&A) | ✅ 원격 동작 | `Storage/AskAIService.swift` (`OpenAIAskAI`) + `App/AskAISidebar.swift` — gpt-4o-mini Chat Completions, 대화 히스토리 보관 |
+| 액션 아이템 자동 추출 | ✅ 동작 | `Storage/ActionItemExtractor.swift` + `App/ActionItemsPanel.swift` — 마크다운 요약 파싱 (담당/기한/우선순위 메타), ko/en 헤더 지원 |
+| 메모 (자유 텍스트) | ✅ 동작 | `Storage/MeetingNotes.swift` + `App/MemoPanel.swift` — JSON 영속화, inline 편집/삭제 |
+| Notion 익스포트 | ✅ 코드 동작 / 🟡 토큰 사용자 필요 | `Storage/NotionExporter.swift` — 공식 Notion REST API 직접 호출, database/page 부모 양쪽 지원 |
 | 인터넷 없이도 동작 | ✅ 90% | Whisper/PDF/검색/익스포트/저장/메뉴바/i18n OFFLINE OK. 요약/번역은 OpenAI 원격이 기본 (로컬 엔진은 후속) |
 
 **범례**: ✅ 코드 동작, 🟡 사용자 트리거 또는 외부 자산 필요, 🔌 stub, ⏸️ 미착수
 
 ### 테스트 커버리지
-- `swift build` 클린, `swift test` **86/86** 통과
+- `swift build` 클린, `swift test` **110/110** 통과
 - 검증 방식: 단위/통합 (인메모리), AX 트리 직접 검증 (UI), `WhisperKitProbe` 로 실제 추론 (외부)
 
 ---
@@ -121,7 +126,8 @@ Alt 앱과 기능 동등성을 달성하기 위한 단계별 로드맵.
 
 1. **Screen Recording 권한 부여** — 시스템 설정 → 개인정보 보호 → 화면 녹화에서 MeetingMuseAlt(또는 Terminal/Xcode) 허용. SystemAudioTap IO proc 의 실제 PCM 흐름은 이 권한이 있어야 callback 호출됨.
 2. **Pyannote 모델 변환** — `huggingface.co/pyannote/segmentation-3.0` 약관 동의 + 토큰 발급 후 `HF_TOKEN=hf_xxx python3 scripts/convert_pyannote.py` 실행. `.mlpackage` 가 `~/Library/Application Support/MeetingMuseAlt/Models/` 에 생기면 `PyannoteEngine.segment` 자동 동작.
-3. **OpenAI API 키 입력** — `SettingsModal`/`AppSettings` 에 입력. `OpenAISummarizer` / `OpenAITranslator` 활성화.
+3. **OpenAI API 키 입력** — 설정 탭 SecureField (`AppSettings.openAIAPIKey`) 에 입력. `OpenAISummarizer` / `OpenAITranslator` / `OpenAIAskAI` 활성화.
+4. **Notion Integration 토큰** — notion.so/my-integrations 발급 후 `NotionAPIExporter(integrationToken:)` 로 전달. databaseID 또는 parentPageID 중 하나 필요.
 4. **풀 Xcode 설치** — `xcodebuild` / Hardened Runtime / Notarization 빌드. CommandLineTools 만으로는 `xcodegen generate` 까지만 검증 가능.
 
 ## ⏸️ 후속 PR (코드 추가 작업)
