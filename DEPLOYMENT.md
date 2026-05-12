@@ -167,29 +167,192 @@ jobs:
 
 `.github/workflows/release.yml` 에 저장 (또는 GitHub 웹 UI):
 
-전체 내용은 [/tmp/release.yml](https://github.com/dawith-ai/meeting-muse-alt/blob/main/DEPLOYMENT.md#release-yml-content) — 너무 길어 별도 섹션에 보관. 아래 명령으로 전체 텍스트를 받아 GitHub 웹 UI 의 "set up a workflow yourself" 에 붙여넣어 주세요:
+```yaml
+name: Release
 
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (e.g. 0.4.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: |
+          sed -i '' "s/MARKETING_VERSION: \"[^\"]*\"/MARKETING_VERSION: \"${{ steps.ver.outputs.version }}\"/" project.yml
+          xcodegen generate
+
+      - name: Import code signing certificate
+        if: ${{ secrets.MAC_APP_DEVELOPER_ID_CERT != '' }}
+        env:
+          MAC_APP_DEVELOPER_ID_CERT: ${{ secrets.MAC_APP_DEVELOPER_ID_CERT }}
+          MAC_APP_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.MAC_APP_DEVELOPER_ID_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          echo "$MAC_APP_DEVELOPER_ID_CERT" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN_PATH" \
+            -P "$MAC_APP_DEVELOPER_ID_CERT_PASSWORD" -A -t cert -f pkcs12
+          security list-keychain -d user -s "$KEYCHAIN_PATH" $(security list-keychain -d user | tr -d \")
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+      - name: Build & archive (.app)
+        env:
+          DEVELOPER_ID: ${{ secrets.MAC_DEVELOPER_ID_APPLICATION }}
+        run: |
+          mkdir -p build
+          if [[ -n "$DEVELOPER_ID" ]]; then
+            CODE_SIGN_FLAGS="CODE_SIGN_IDENTITY=\"$DEVELOPER_ID\" CODE_SIGN_STYLE=Manual"
+          else
+            CODE_SIGN_FLAGS="CODE_SIGN_IDENTITY=\"\" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO"
+          fi
+          eval xcodebuild -project MeetingMuseAlt.xcodeproj -scheme MeetingMuseAlt \
+            -configuration Release -derivedDataPath build/derived \
+            -destination "platform=macOS" $CODE_SIGN_FLAGS \
+            archive -archivePath build/MeetingMuseAlt.xcarchive
+
+      - name: Notarize
+        if: ${{ secrets.APPLE_ID != '' }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          APP_PATH="build/MeetingMuseAlt.xcarchive/Products/Applications/MeetingMuseAlt.app"
+          ZIP_PATH="build/MeetingMuseAlt.zip"
+          ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
+          xcrun notarytool submit "$ZIP_PATH" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple "$APP_PATH"
+
+      - name: Create DMG
+        run: |
+          APP_PATH="build/MeetingMuseAlt.xcarchive/Products/Applications/MeetingMuseAlt.app"
+          DMG_PATH="build/MeetingMuseAlt-${{ steps.ver.outputs.version }}.dmg"
+          mkdir -p build/dmg-staging
+          cp -R "$APP_PATH" build/dmg-staging/
+          ln -s /Applications build/dmg-staging/Applications
+          hdiutil create -volname "Meeting Muse Alt" -srcfolder build/dmg-staging \
+            -ov -format UDZO "$DMG_PATH"
+
+      - name: Sign DMG (Sparkle EdDSA)
+        if: ${{ secrets.SPARKLE_ED_PRIVATE_KEY != '' }}
+        id: edsign
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          curl -L -o sparkle.tar.xz https://github.com/sparkle-project/Sparkle/releases/download/2.9.1/Sparkle-2.9.1.tar.xz
+          tar -xf sparkle.tar.xz
+          DMG_PATH="build/MeetingMuseAlt-${{ steps.ver.outputs.version }}.dmg"
+          echo "$SPARKLE_ED_PRIVATE_KEY" > /tmp/ed_private_key
+          SIG=$(./bin/sign_update -f /tmp/ed_private_key "$DMG_PATH")
+          rm /tmp/ed_private_key
+          echo "signature=$SIG" >> $GITHUB_OUTPUT
+
+      - name: Update appcast.xml
+        run: |
+          DMG_NAME="MeetingMuseAlt-${{ steps.ver.outputs.version }}.dmg"
+          DMG_PATH="build/$DMG_NAME"
+          DMG_SIZE=$(stat -f%z "$DMG_PATH")
+          PUB_DATE=$(date -R)
+          SIG_ATTR="${{ steps.edsign.outputs.signature }}"
+          cat > build/appcast-entry.xml <<EOF
+          <item>
+            <title>Version ${{ steps.ver.outputs.version }}</title>
+            <pubDate>$PUB_DATE</pubDate>
+            <sparkle:version>${{ steps.ver.outputs.version }}</sparkle:version>
+            <sparkle:shortVersionString>${{ steps.ver.outputs.version }}</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure
+              url="https://github.com/${{ github.repository }}/releases/download/v${{ steps.ver.outputs.version }}/$DMG_NAME"
+              length="$DMG_SIZE"
+              type="application/octet-stream"
+              $SIG_ATTR />
+          </item>
+          EOF
+          awk -v entry_file=build/appcast-entry.xml '
+            /<channel>/ {
+              print
+              while ((getline line < entry_file) > 0) print "    " line
+              close(entry_file)
+              next
+            }
+            { print }
+          ' appcast.xml > appcast.xml.new
+          mv appcast.xml.new appcast.xml
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add appcast.xml
+          git commit -m "chore(release): appcast.xml 갱신 — v${{ steps.ver.outputs.version }}" || echo "no changes"
+          git push origin HEAD:main || echo "push skipped"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: "Meeting Muse Alt v${{ steps.ver.outputs.version }}"
+          files: build/MeetingMuseAlt-${{ steps.ver.outputs.version }}.dmg
+          body: |
+            ## Meeting Muse Alt v${{ steps.ver.outputs.version }}
+
+            macOS 14+ 회의 녹음/전사/요약 네이티브 앱.
+
+            ### 설치
+            1. `.dmg` 다운로드 → `MeetingMuseAlt.app` 을 Applications 로 드래그
+            2. 첫 실행 시 시스템 설정 → 개인정보 보호:
+               - 마이크 (필수)
+               - 화면 녹화 (시스템 오디오 캡처 시)
+               - Apple Intelligence 활성화 (로컬 LLM 사용 시)
+
+            ### 자동 업데이트
+            v0.3 이상은 메뉴 → "업데이트 확인..." 또는 매일 자동 폴링.
+```
+
+추가 방법 (둘 중 하나):
+
+**옵션 A: 로컬에서 `gh auth refresh`** (인터랙티브 2FA):
 ```bash
-# 이 명령은 GitHub Actions 가 처음 추가될 때 한 번만 실행
 gh auth refresh -s workflow
 cd /Users/dawith/개발/meeting-muse-alt
 mkdir -p .github/workflows
-# (release.yml / ci.yml 내용은 이 PR 의 첫 시도에서 작성됐고 /tmp/ 에 백업됨)
-cp /tmp/ci.yml .github/workflows/
-cp /tmp/release.yml .github/workflows/
+# 위 YAML 두 개를 ci.yml / release.yml 로 저장 후
 git add .github
 git commit -m "ci: 워크플로우 추가"
 git push origin main
 ```
 
-핵심 동작 (`release.yml`):
-1. 태그 `v*` 푸시 트리거
-2. `macos-15` runner 에서 `xcodegen generate` → `xcodebuild archive`
-3. Developer ID 인증서 import (secret `MAC_APP_DEVELOPER_ID_CERT` 있을 때)
-4. `xcrun notarytool submit --wait` 공증 (secret `APPLE_ID` 있을 때)
-5. `hdiutil` 로 DMG 생성 (외부 도구 불필요)
-6. Sparkle `sign_update` EdDSA 서명 (secret `SPARKLE_ED_PRIVATE_KEY` 있을 때)
-7. `appcast.xml` 에 새 `<item>` 자동 삽입 + main 브랜치에 푸시
-8. `softprops/action-gh-release@v2` 로 GitHub Releases 업로드
-
-전체 YAML 은 이 PR 의 첫 시도 (`feat/deploy-pipeline` 브랜치 커밋 `c1cfbba`) 에 있었으나 `workflow` scope 부재로 푸시 거부됨. 위 명령으로 로컬에서 추가 후 한 번 푸시하면 영구 활성화됩니다.
+**옵션 B: GitHub 웹 UI** (가장 간단):
+1. https://github.com/dawith-ai/meeting-muse-alt/actions/new
+2. "set up a workflow yourself" 클릭 → 위 CI YAML 붙여넣기 → `ci.yml` 로 저장 → commit
+3. 같은 절차로 `release.yml` 추가
